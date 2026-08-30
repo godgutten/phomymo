@@ -4,10 +4,10 @@
  * v116
  */
 
-import { CanvasRenderer } from './canvas.js?v=115';
+import { CanvasRenderer } from './canvas.js?v=120';
 import { BLETransport } from './ble.js?v=103';
 import { USBTransport } from './usb.js?v=101';
-import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=128';
+import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterOffsetX, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=130';
 import {
   createTextElement,
   createImageElement,
@@ -54,7 +54,20 @@ import {
   loadDesign,
   listDesigns,
   deleteDesign,
-} from './storage.js?v=100';
+  syncLocalToCloud,
+  localDesignCount,
+  isCloudActive,
+} from './template-store.js?v=100';
+import {
+  isAuthAvailable,
+  initAuth,
+  getUser,
+  onAuthChange,
+  signIn,
+  signUp,
+  signOut,
+  resetPassword,
+} from './auth.js?v=100';
 import {
   extractFields,
   hasTemplateFields,
@@ -84,7 +97,7 @@ import {
   D_SERIES_ROUND_LABELS,
   TAPE_LABEL_SIZES,
   PM241_LABEL_SIZES,
-} from './constants.js?v=105';
+} from './constants.js?v=107';
 import {
   bindCheckbox,
   bindToggleButton,
@@ -168,6 +181,7 @@ const state = {
     copies: 1,        // Number of copies
     feed: 32,         // Feed after print in dots (8 dots = 1mm)
     printerModel: 'auto',  // 'auto', 'narrow-48', 'mini-54', 'wide-72', 'mid-76', 'wide-81', 'd-series'
+    offsetAdjust: PRINT.DEFAULT_OFFSET_ADJUST,  // User nudge on top of the model's own offset
   },
   // Template state
   templateFields: [],     // Detected field names from elements
@@ -1865,7 +1879,7 @@ async function handleBatchPrint() {
 
   const btn = $('#template-print-btn');
   const originalText = btn.textContent;
-  const { density, feed, printerModel } = state.printSettings;
+  const { density, feed, printerModel, offsetAdjust } = state.printSettings;
 
   // Calculate total prints based on multi-label mode
   const isMultiLabel = state.multiLabel.enabled;
@@ -1942,14 +1956,20 @@ async function handleBatchPrint() {
       const deviceName = state.transport.getDeviceName?.() || '';
       const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
       const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+      // Model baseline for an off-centre roll, plus the user's own nudge.
+      const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
       // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
       let ditherMode = getDitherMode(mergedElements);
       if (ditherMode === 'auto' && isTSPLPrinter(deviceName, printerModel)) {
         ditherMode = 'threshold';
       }
+      // Field substitution rewrote the barcode/QR payloads, so their bitmaps are
+      // not cached yet — rasterising now would bake in the placeholder.
+      await state.renderer.prepareForRaster(mergedElements);
+
       const rasterData = isRotatedPrinter(deviceName, printerModel)
-        ? state.renderer.getRasterDataRaw(mergedElements, ditherMode)
-        : state.renderer.getRasterData(mergedElements, printerWidth, 203, ditherMode, printerAlignment);
+        ? state.renderer.getRasterDataRaw(mergedElements, ditherMode, offsetX)
+        : state.renderer.getRasterData(mergedElements, printerWidth, 203, ditherMode, printerAlignment, offsetX);
 
       // Print
       await print(state.transport, rasterData, {
@@ -2004,7 +2024,7 @@ async function handlePrintSinglePreview() {
 
   const btn = $('#full-preview-print');
   const originalText = btn.textContent;
-  const { density, feed, printerModel } = state.printSettings;
+  const { density, feed, printerModel, offsetAdjust } = state.printSettings;
 
   try {
     btn.disabled = true;
@@ -2029,14 +2049,20 @@ async function handlePrintSinglePreview() {
     const deviceName = state.transport.getDeviceName?.() || '';
     const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
     const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+    // Model baseline for an off-centre roll, plus the user's own nudge.
+    const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
     // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
     let ditherMode = getDitherMode(mergedElements);
     if (ditherMode === 'auto' && isTSPLPrinter(deviceName, printerModel)) {
       ditherMode = 'threshold';
     }
+    // Field substitution rewrote the barcode/QR payloads, so their bitmaps are
+    // not cached yet — rasterising now would bake in the placeholder.
+    await state.renderer.prepareForRaster(mergedElements);
+
     const rasterData = isRotatedPrinter(deviceName, printerModel)
-      ? state.renderer.getRasterDataRaw(mergedElements, ditherMode)
-      : state.renderer.getRasterData(mergedElements, printerWidth, 203, ditherMode, printerAlignment);
+      ? state.renderer.getRasterDataRaw(mergedElements, ditherMode, offsetX)
+      : state.renderer.getRasterData(mergedElements, printerWidth, 203, ditherMode, printerAlignment, offsetX);
 
     // Print
     await print(state.transport, rasterData, {
@@ -2155,7 +2181,7 @@ function modifyElement(id, changes) {
   state.elements = updateElement(state.elements, id, changes);
 
   // Only clear cache if content or size changed (not just position/rotation)
-  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold'];
+  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold', 'fitWidth'];
   const needsCacheClear = Object.keys(changes).some(key => contentKeys.includes(key));
   if (needsCacheClear) {
     state.renderer.clearCache(id);
@@ -2382,6 +2408,7 @@ function updatePropertiesPanel() {
       $('#prop-barcode-data').value = element.barcodeData || '';
       $('#prop-barcode-format').value = element.barcodeFormat || 'CODE128';
       $('#prop-barcode-showtext').checked = element.showText !== false;
+      $('#prop-barcode-fitwidth').checked = element.fitWidth === true;
       $('#prop-barcode-fontsize').value = element.textFontSize || 12;
       $('#prop-barcode-bold').checked = element.textBold || false;
       $('#barcode-text-options')?.classList.toggle('hidden', element.showText === false);
@@ -4739,7 +4766,7 @@ async function handleConnect(event) {
 async function handlePrint() {
   const btn = $('#print-btn');
   const originalText = btn.textContent;
-  const { density, copies, feed, printerModel } = state.printSettings;
+  const { density, copies, feed, printerModel, offsetAdjust } = state.printSettings;
 
   try {
     btn.disabled = true;
@@ -4768,6 +4795,8 @@ async function handlePrint() {
     const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
     const printerDpi = getPrinterDpi(deviceName, printerModel);
     const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+    // Model baseline for an off-centre roll, plus the user's own nudge.
+    const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
     // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
     // Auto-detection can incorrectly choose dithering due to anti-aliased edges
     let ditherMode = getDitherMode(elementsToRender);
@@ -4775,9 +4804,13 @@ async function handlePrint() {
       ditherMode = 'threshold';
       console.log('TSPL printer: forcing threshold mode for crisp barcodes');
     }
+    // Expressions/fields may have rewritten barcode and QR payloads, so their
+    // bitmaps are not cached yet — rasterising now would bake in the placeholder.
+    await state.renderer.prepareForRaster(elementsToRender);
+
     const rasterData = isRotatedPrinter(deviceName, printerModel)
-      ? state.renderer.getRasterDataRaw(elementsToRender, ditherMode)
-      : state.renderer.getRasterData(elementsToRender, printerWidth, printerDpi, ditherMode, printerAlignment);
+      ? state.renderer.getRasterDataRaw(elementsToRender, ditherMode, offsetX)
+      : state.renderer.getRasterData(elementsToRender, printerWidth, printerDpi, ditherMode, printerAlignment, offsetX);
 
     // Print multiple copies if requested
     for (let copy = 1; copy <= copies; copy++) {
@@ -4856,7 +4889,7 @@ function hideSaveDialog() {
 /**
  * Save current design
  */
-function handleSave() {
+async function handleSave() {
   const nameValidation = validateDesignName($('#save-name').value);
   if (!nameValidation.valid) {
     setStatus(nameValidation.error);
@@ -4884,7 +4917,7 @@ function handleSave() {
       designData.multiLabel = { ...state.multiLabel };
     }
 
-    saveDesign(name, designData);
+    await saveDesign(name, designData);
     hideSaveDialog();
 
     // Update current design name and mobile display
@@ -4894,7 +4927,8 @@ function handleSave() {
     const templateInfo = state.templateData.length > 0
       ? ` (with ${state.templateData.length} data records)`
       : '';
-    setStatus(`Design "${name}" saved${templateInfo}`);
+    const destination = isCloudActive() ? ' to your account' : '';
+    setStatus(`Design "${name}" saved${destination}${templateInfo}`);
   } catch (e) {
     showToast(e.message, 'error');
     setStatus(e.message);
@@ -4904,9 +4938,19 @@ function handleSave() {
 /**
  * Show load dialog
  */
-function showLoadDialog() {
-  const designs = listDesigns();
+async function showLoadDialog() {
   const listEl = $('#design-list');
+
+  let designs;
+  try {
+    designs = await listDesigns();
+  } catch (e) {
+    // A cloud read can fail while offline; keep the dialog usable for imports.
+    logError(e, 'listDesigns');
+    listEl.innerHTML = '<div class="text-sm text-red-500 text-center py-8">Could not load your saved designs</div>';
+    $('#load-dialog').classList.remove('hidden');
+    return;
+  }
 
   if (designs.length === 0) {
     listEl.innerHTML = '<div class="text-sm text-gray-400 text-center py-8">No saved designs</div>';
@@ -4943,14 +4987,18 @@ function showLoadDialog() {
 
     // Bind click handlers
     listEl.querySelectorAll('.design-item').forEach(item => {
-      item.addEventListener('click', (e) => {
+      item.addEventListener('click', async (e) => {
         if (e.target.classList.contains('delete-design')) {
           e.stopPropagation();
           const name = e.target.dataset.name;
           if (confirm(`Delete "${name}"?`)) {
-            deleteDesign(name);
-            showLoadDialog(); // Refresh list
-            setStatus(`Design "${name}" deleted`);
+            try {
+              await deleteDesign(name);
+              await showLoadDialog(); // Refresh list
+              setStatus(`Design "${name}" deleted`);
+            } catch (err) {
+              showToast(err.message, 'error');
+            }
           }
           return;
         }
@@ -4967,6 +5015,207 @@ function showLoadDialog() {
  */
 function hideLoadDialog() {
   $('#load-dialog').classList.add('hidden');
+}
+
+// =============================================================================
+// ACCOUNT / CLOUD TEMPLATES
+// =============================================================================
+
+/** Which form the signed-out pane is showing: 'signin' or 'signup'. */
+let authMode = 'signin';
+
+/**
+ * Reflect sign-in state in the header button. The button stays hidden entirely
+ * on deployments with no Supabase project configured.
+ */
+function updateAccountButton() {
+  const btn = $('#account-btn');
+  if (!btn) return;
+
+  if (!isAuthAvailable()) {
+    btn.classList.add('hidden');
+    return;
+  }
+
+  btn.classList.remove('hidden');
+
+  const user = getUser();
+  const label = $('#account-btn-label');
+  if (label) label.textContent = user ? user.email : 'Sign in';
+  btn.title = user ? `Signed in as ${user.email}` : 'Sign in to save templates to the cloud';
+}
+
+/**
+ * @param {string} selector - Message element to write into
+ * @param {string} text - Empty string hides the element
+ * @param {boolean} isError
+ */
+function setAuthMessage(selector, text, isError) {
+  const el = $(selector);
+  if (!el) return;
+
+  if (!text) {
+    el.className = 'hidden text-xs mb-3';
+    el.textContent = '';
+    return;
+  }
+
+  el.className = `text-xs mb-3 ${isError ? 'text-red-600' : 'text-green-600'}`;
+  el.textContent = text;
+}
+
+/** Switch the signed-out pane between signing in and creating an account. */
+function setAuthMode(mode) {
+  authMode = mode;
+  const signingUp = mode === 'signup';
+
+  $('#auth-title').textContent = signingUp ? 'Create account' : 'Sign in';
+  $('#auth-submit').textContent = signingUp ? 'Create account' : 'Sign in';
+  $('#auth-toggle-mode').textContent = signingUp ? 'I already have an account' : 'Create an account';
+  $('#auth-password').setAttribute('autocomplete', signingUp ? 'new-password' : 'current-password');
+  setAuthMessage('#auth-message', '');
+}
+
+/** Show whichever pane matches the current sign-in state. */
+function refreshAuthDialog() {
+  const user = getUser();
+  $('#auth-signed-out').classList.toggle('hidden', Boolean(user));
+  $('#auth-signed-in').classList.toggle('hidden', !user);
+
+  if (!user) {
+    setAuthMode('signin');
+    return;
+  }
+
+  $('#auth-user-email').textContent = user.email || '';
+  setAuthMessage('#auth-account-message', '');
+
+  // Only offer the upload when this browser actually holds something to move.
+  const pending = localDesignCount();
+  $('#auth-sync-count').textContent = String(pending);
+  $('#auth-sync-row').classList.toggle('hidden', pending === 0);
+}
+
+function showAuthDialog() {
+  refreshAuthDialog();
+  $('#auth-dialog').classList.remove('hidden');
+  if (!getUser()) $('#auth-email').focus();
+}
+
+function hideAuthDialog() {
+  $('#auth-dialog').classList.add('hidden');
+}
+
+/** Sign in or create an account, depending on the current mode. */
+async function handleAuthSubmit() {
+  const email = $('#auth-email').value.trim();
+  const password = $('#auth-password').value;
+
+  if (!email || !password) {
+    setAuthMessage('#auth-message', 'Enter an email and password.', true);
+    return;
+  }
+
+  const submitBtn = $('#auth-submit');
+  submitBtn.disabled = true;
+  setAuthMessage('#auth-message', 'Working...', false);
+
+  try {
+    if (authMode === 'signup') {
+      const { needsConfirmation } = await signUp(email, password);
+      if (needsConfirmation) {
+        // Project requires email confirmation; there is no session to use yet.
+        setAuthMessage('#auth-message', 'Check your email to confirm the account, then sign in.', false);
+        setAuthMode('signin');
+        return;
+      }
+    } else {
+      await signIn(email, password);
+    }
+
+    $('#auth-password').value = '';
+    setStatus(`Signed in as ${getUser()?.email || email}`);
+    hideAuthDialog();
+  } catch (e) {
+    setAuthMessage('#auth-message', e.message, true);
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function handleForgotPassword() {
+  const email = $('#auth-email').value.trim();
+  if (!email) {
+    setAuthMessage('#auth-message', 'Enter your email address first.', true);
+    return;
+  }
+
+  try {
+    await resetPassword(email);
+    setAuthMessage('#auth-message', 'Password reset email sent.', false);
+  } catch (e) {
+    setAuthMessage('#auth-message', e.message, true);
+  }
+}
+
+async function handleSignOut() {
+  try {
+    await signOut();
+    setStatus('Signed out — designs are saving to this browser again');
+    hideAuthDialog();
+  } catch (e) {
+    setAuthMessage('#auth-account-message', e.message, true);
+  }
+}
+
+/** Copy this browser's saved designs up into the signed-in account. */
+async function handleSyncLocal() {
+  const btn = $('#auth-sync');
+  btn.disabled = true;
+  setAuthMessage('#auth-account-message', 'Uploading...', false);
+
+  try {
+    const { uploaded, skipped } = await syncLocalToCloud();
+    const parts = [`${uploaded.length} uploaded`];
+    if (skipped.length > 0) {
+      parts.push(`${skipped.length} skipped (that name is already in your account)`);
+    }
+    setAuthMessage('#auth-account-message', parts.join(', '), false);
+  } catch (e) {
+    setAuthMessage('#auth-account-message', e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/**
+ * Wire up the account UI and restore any persisted session. Beyond hiding the
+ * button, this does nothing when sign-in is not configured for the deployment.
+ */
+function initAccountUI() {
+  updateAccountButton();
+  if (!isAuthAvailable()) return;
+
+  $('#account-btn').addEventListener('click', showAuthDialog);
+  $('#auth-cancel').addEventListener('click', hideAuthDialog);
+  $('#auth-close').addEventListener('click', hideAuthDialog);
+  $('#auth-submit').addEventListener('click', handleAuthSubmit);
+  $('#auth-forgot').addEventListener('click', handleForgotPassword);
+  $('#auth-signout').addEventListener('click', handleSignOut);
+  $('#auth-sync').addEventListener('click', handleSyncLocal);
+  $('#auth-toggle-mode').addEventListener('click', () => {
+    setAuthMode(authMode === 'signup' ? 'signin' : 'signup');
+  });
+  $('#auth-password').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleAuthSubmit();
+  });
+
+  onAuthChange(() => {
+    updateAccountButton();
+    if (!$('#auth-dialog').classList.contains('hidden')) refreshAuthDialog();
+  });
+
+  initAuth();
 }
 
 /**
@@ -5263,8 +5512,16 @@ function getElementLabel(el) {
 /**
  * Load a design
  */
-function handleLoad(name) {
-  const design = loadDesign(name);
+async function handleLoad(name) {
+  let design;
+  try {
+    design = await loadDesign(name);
+  } catch (e) {
+    showToast(e.message, 'error');
+    setStatus('Could not load design');
+    return;
+  }
+
   if (!design) {
     setStatus('Design not found');
     return;
@@ -6278,6 +6535,12 @@ function populateMobileProps() {
           <span class="text-sm">Show text below barcode</span>
         </label>
       </div>
+      <div class="prop-group">
+        <label class="flex items-center gap-2 py-1">
+          <input type="checkbox" id="mobile-prop-fitWidth" class="w-5 h-5" ${selected.fitWidth ? 'checked' : ''}>
+          <span class="text-sm">Fit barcode to width</span>
+        </label>
+      </div>
       <div class="prop-group ${selected.showText === false ? 'hidden' : ''}" id="mobile-barcode-text-options">
         <div class="prop-label">Text Style</div>
         <div class="flex items-center gap-3">
@@ -6566,6 +6829,7 @@ function wireUpMobilePropHandlers(element) {
       textOptions.classList.toggle('hidden', !e.target.checked);
     }
   });
+  $('#mobile-prop-fitWidth')?.addEventListener('change', (e) => updateProp('fitWidth', e.target.checked));
   $('#mobile-prop-textFontSize')?.addEventListener('change', (e) => updateProp('textFontSize', parseInt(e.target.value) || 12));
   $('#mobile-prop-textBold')?.addEventListener('change', (e) => updateProp('textBold', e.target.checked));
 
@@ -7065,6 +7329,9 @@ function init() {
   // Initialize local fonts (show button or auto-load if previously enabled)
   initLocalFonts();
 
+  // Account UI + restore any previous session (no-op when Supabase is unconfigured)
+  initAccountUI();
+
   // Load printer definitions (built-in + custom) then populate dropdown
   loadPrinterDefinitions().then(() => {
     populatePrinterModelDropdown();
@@ -7241,6 +7508,7 @@ function init() {
   const densityValue = $('#print-density-value');
   const copiesInput = $('#print-copies');
   const feedSelect = $('#print-feed');
+  const offsetXInput = $('#print-offset-x');
   const printerModelSelect = $('#printer-model');
 
   // Load saved print settings from localStorage
@@ -7259,6 +7527,7 @@ function init() {
       densityValue.textContent = state.printSettings.density;
       copiesInput.value = state.printSettings.copies;
       feedSelect.value = state.printSettings.feed;
+      offsetXInput.value = state.printSettings.offsetAdjust ?? PRINT.DEFAULT_OFFSET_ADJUST;
       printerModelSelect.value = state.printSettings.printerModel || 'auto';
     }
   }
@@ -7294,6 +7563,7 @@ function init() {
     densityValue.textContent = state.printSettings.density;
     copiesInput.value = state.printSettings.copies;
     feedSelect.value = state.printSettings.feed;
+    offsetXInput.value = state.printSettings.offsetAdjust ?? PRINT.DEFAULT_OFFSET_ADJUST;
     printerModelSelect.value = state.printSettings.printerModel || 'auto';
     printSettingsDialog.classList.remove('hidden');
   });
@@ -7307,11 +7577,18 @@ function init() {
   });
 
   $('#print-settings-reset').addEventListener('click', () => {
-    state.printSettings = { density: 6, copies: 1, feed: 32, printerModel: 'auto' };
-    densitySlider.value = 6;
-    densityValue.textContent = '6';
-    copiesInput.value = 1;
-    feedSelect.value = 32;
+    state.printSettings = {
+      density: PRINT.DEFAULT_DENSITY,
+      copies: PRINT.DEFAULT_COPIES,
+      feed: PRINT.DEFAULT_FEED,
+      printerModel: 'auto',
+      offsetAdjust: PRINT.DEFAULT_OFFSET_ADJUST,
+    };
+    densitySlider.value = PRINT.DEFAULT_DENSITY;
+    densityValue.textContent = String(PRINT.DEFAULT_DENSITY);
+    copiesInput.value = PRINT.DEFAULT_COPIES;
+    feedSelect.value = PRINT.DEFAULT_FEED;
+    offsetXInput.value = PRINT.DEFAULT_OFFSET_ADJUST;
     printerModelSelect.value = 'auto';
   });
 
@@ -7319,6 +7596,7 @@ function init() {
     state.printSettings.density = parseInt(densitySlider.value);
     state.printSettings.copies = Math.max(PRINT.MIN_COPIES, Math.min(PRINT.MAX_COPIES, parseInt(copiesInput.value) || PRINT.DEFAULT_COPIES));
     state.printSettings.feed = parseInt(feedSelect.value);
+    state.printSettings.offsetAdjust = Math.max(PRINT.MIN_OFFSET_ADJUST, Math.min(PRINT.MAX_OFFSET_ADJUST, parseInt(offsetXInput.value) || 0));
     state.printSettings.printerModel = printerModelSelect.value;
 
     // Save to localStorage
@@ -7898,6 +8176,15 @@ function init() {
       modifyElement(element.id, { showText: e.target.checked });
       // Show/hide text options
       $('#barcode-text-options')?.classList.toggle('hidden', !e.target.checked);
+    }
+  });
+
+  // Fit barcode to element width
+  $('#prop-barcode-fitwidth').addEventListener('change', (e) => {
+    const element = getSelected();
+    if (element && element.type === 'barcode') {
+      saveHistory();
+      modifyElement(element.id, { fitWidth: e.target.checked });
     }
   });
 

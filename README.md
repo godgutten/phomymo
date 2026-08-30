@@ -45,6 +45,38 @@ python3 -m http.server 8080
 
 **Printer Status** - Live battery level, paper status, firmware version, and serial number with auto-query on connect.
 
+**Cloud Templates** *(optional)* - Sign in with an email and password to save designs to your account and reach them from any device. Off by default; see below.
+
+## Cloud Templates
+
+Phomymo works entirely offline, saving designs to browser storage. If you want accounts and cross-device templates, point it at a [Supabase](https://supabase.com) project — the site stays static, so there is still no server to run.
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. In the dashboard, open **SQL Editor -> New query**, paste the contents of [`supabase/schema.sql`](supabase/schema.sql), and run it. This creates the `designs` table and the Row Level Security policies that keep each user's designs private.
+3. Open **Project Settings -> API** and copy the **Project URL** and the **anon public** key.
+4. Paste both into `src/web/supabase-config.js`:
+
+   ```js
+   export const SUPABASE_URL = 'https://yourproject.supabase.co';
+   export const SUPABASE_ANON_KEY = 'eyJhbGci...';
+   ```
+
+5. Reload the app. A **Sign in** button appears in the header.
+
+Both values are safe to commit — the anon key is a public client key, and Row Level Security is what actually protects the data. Leave them empty and the app behaves exactly as it did before: no sign-in button, designs in browser storage only.
+
+Once signed in, saves and loads go to your account instead of browser storage. Designs already saved in the browser stay put, and the account dialog offers a one-click upload for them (existing cloud designs with the same name are skipped rather than overwritten).
+
+By default Supabase emails a confirmation link on sign-up. To skip that while testing, turn off **Confirm email** under **Authentication -> Sign In / Providers -> Email**.
+
+## Print Alignment
+
+Phomemo printers place a label within the full width of the print head, and where the label physically sits under that head varies by model and by how the roll is loaded. If prints land consistently off to one side, set **Horizontal Offset** in Print Settings rather than nudging every element in your design.
+
+The value is in printer dots — 8 dots = 1 mm — and positive moves the print right. It is saved with your other print settings and applies to single prints, batch prints, and the print preview.
+
+Each printer definition in `printers.json` carries its own `offsetX` baseline for hardware whose roll does not sit where `alignment` assumes; the M110/M120 ships with 38 dots. Your setting in Print Settings is a fine-tune *on top* of that baseline, so it starts at 0 and you only change it if your particular unit still prints off-centre.
+
 ## Supported Printers
 
 | Model | Width | Notes |
@@ -111,6 +143,10 @@ phomymo/
 │       ├── elements.js    # Element management
 │       ├── handles.js     # Selection handles
 │       ├── storage.js     # localStorage persistence
+│       ├── cloud-storage.js    # Supabase design persistence
+│       ├── template-store.js   # Routes saves to cloud or localStorage
+│       ├── auth.js             # Email/password sign-in
+│       ├── supabase-config.js  # Supabase project URL + anon key
 │       ├── templates.js   # Variable substitution & CSV
 │       ├── ble.js         # Web Bluetooth transport
 │       ├── usb.js         # WebUSB transport
@@ -121,6 +157,8 @@ phomymo/
 │           ├── bindings.js   # Event binding helpers
 │           ├── errors.js     # Error handling
 │           └── validation.js # Input validation
+├── supabase/
+│   └── schema.sql     # Cloud templates table + RLS policies
 └── README.md
 ```
 

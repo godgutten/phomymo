@@ -70,6 +70,12 @@ export const PRINT = {
   DEFAULT_COPIES: 1,
   DEFAULT_DENSITY: 6,
   DEFAULT_FEED: 32,
+  // User's own horizontal print nudge in dots (8 = 1mm), positive moves right.
+  // Added on top of the model's own offsetX in printers.json, which carries the
+  // baseline for hardware whose roll does not sit where `alignment` assumes.
+  DEFAULT_OFFSET_ADJUST: 0,
+  MIN_OFFSET_ADJUST: -200,
+  MAX_OFFSET_ADJUST: 200,
 };
 
 // =============================================================================

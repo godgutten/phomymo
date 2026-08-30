@@ -25,7 +25,9 @@ let _loaded = false;
  */
 export async function loadPrinterDefinitions() {
   try {
-    const resp = await fetch('./printers.json');
+    // Versioned like the JS modules: without it a browser keeps serving a cached
+    // copy and never picks up printer definition changes after a deploy.
+    const resp = await fetch('./printers.json?v=2');
     const json = await resp.json();
     _builtinDefinitions = json.printers || [];
   } catch (e) {
@@ -476,6 +478,23 @@ export function getPrinterAlignment(deviceName, modelOverride = 'auto') {
   const def = config.definition;
   if (def && def.alignment) return def.alignment;
   return 'center';
+}
+
+/**
+ * Baseline horizontal print nudge for a model, in dots (8 = 1mm, + moves right).
+ *
+ * Compensates for the label roll not sitting where `alignment` assumes on a
+ * particular model. The user's own adjustment in Print Settings is added on top
+ * of this, so the shipped value only has to get the model close.
+ *
+ * @param {string} deviceName
+ * @param {string} modelOverride
+ * @returns {number}
+ */
+export function getPrinterOffsetX(deviceName, modelOverride = 'auto') {
+  const config = _resolveConfig(deviceName, modelOverride);
+  const def = config.definition;
+  return (def && Number.isFinite(def.offsetX)) ? def.offsetX : 0;
 }
 
 export function getPrinterWidthBytes(deviceName, modelOverride = 'auto') {

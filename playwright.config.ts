@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
+const pythonCmd = process.platform === 'win32' ? 'py' : 'python3';
+
 export default defineConfig({
   testDir: './tests',
   timeout: 30_000,
@@ -24,7 +26,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'python3 -m http.server 8081 --directory src/web',
+    command: `${pythonCmd} -m http.server 8081 --directory src/web`,
     port: 8081,
     reuseExistingServer: !process.env.CI,
     timeout: 10_000,

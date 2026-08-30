@@ -58,6 +58,11 @@ export class CanvasRenderer {
     // Barcode/QR render cache
     this.renderCache = new Map();
 
+    // Outstanding barcode/QR rasterisations. Rendering is synchronous but those
+    // two decode through an Image/callback, so a caller that needs a complete
+    // frame (printing, export) has to wait for this to reach zero.
+    this.pendingAsync = 0;
+
     // Callback for when async content (barcodes, QR) finishes loading
     this.onAsyncLoad = null;
 
@@ -1177,49 +1182,148 @@ export class CanvasRenderer {
     const renderHeight = Math.max(1, Math.round(height * renderScale));
     const renderFontSize = textFontSize * renderScale;
 
-    // Probe module count by generating with width=1, margin=0.
-    // The output SVG width then equals the module count in pixels.
-    let moduleCount = 0;
-    try {
-      const probeSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      JsBarcode(probeSvg, barcodeData, {
-        format: barcodeFormat || 'CODE128',
-        width: 1,
-        height: 10,
-        displayValue: false,
-        margin: 0,
+    const format = (barcodeFormat || 'CODE128').toUpperCase();
+
+    // EAN/UPC mandate a specific human-readable layout: the lead digit sits
+    // outside the bars on the left, the remaining digits split under each half,
+    // and the guard bars extend past them. JsBarcode only produces that when it
+    // owns the text, so for these symbologies let it draw the readout rather than
+    // centering a single flat string underneath.
+    const isEanUpc = ['EAN13', 'EAN8', 'EAN5', 'EAN2', 'UPC', 'UPCE'].includes(format);
+    const jsBarcodeDrawsText = isEanUpc && showText;
+
+    // Scale the symbol to the element width instead of snapping to whole-pixel
+    // modules. See the bar width calculation below for the tradeoff.
+    const fitWidth = element.fitWidth === true;
+
+    // Quiet zones are part of the symbol, not padding: without them scanners
+    // reject the code even when every bar is correct. Widths are in modules.
+    const QUIET_ZONES = {
+      EAN13: [11, 7], EAN8: [7, 7], UPC: [9, 9],
+      UPCE: [9, 7], EAN5: [7, 5], EAN2: [7, 5],
+    };
+    const [quietLeft, quietRight] = QUIET_ZONES[format] || [10, 10];
+
+    // The spec's quiet zones are asymmetric (EAN-13 asks for 11 modules left and
+    // 7 right), but honouring that literally leaves the symbol visibly pushed to
+    // one side of its element. Use the wider of the two on both sides: still at
+    // or above every minimum, and it renders centred.
+    const quietZone = Math.max(quietLeft, quietRight);
+
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const baseOptions = {
+      format,
+      displayValue: jsBarcodeDrawsText,
+      font: 'monospace',
+      fontSize: renderFontSize,
+      fontOptions: textBold ? 'bold' : '',
+      textMargin: 2 * renderScale,
+      marginTop: 0,
+      marginBottom: 0,
+    };
+
+    const PROBE_HEIGHT = 10;
+    const measure = (barWidth) => {
+      const svg = document.createElementNS(svgNs, 'svg');
+      JsBarcode(svg, barcodeData, {
+        ...baseOptions,
+        width: barWidth,
+        height: PROBE_HEIGHT,
+        marginLeft: quietZone * barWidth,
+        marginRight: quietZone * barWidth,
       });
-      moduleCount = parseInt(probeSvg.getAttribute('width'), 10) || 0;
+      return {
+        width: parseInt(svg.getAttribute('width'), 10) || 0,
+        height: parseInt(svg.getAttribute('height'), 10) || 0,
+      };
+    };
+
+    // Total width is linear in bar width: `fixed + perBar × barWidth`. The fixed
+    // term is the font-sized gap EAN/UPC reserve for the lead digit, which does
+    // not scale with the bars. Two samples solve for both without depending on
+    // JsBarcode internals.
+    let perBarUnits = 0;
+    let fixedUnits = 0;
+    let heightOverhead = 0;
+    let measurable = false;
+    try {
+      const p1 = measure(1);
+      const p2 = measure(2);
+      perBarUnits = p2.width - p1.width;
+      fixedUnits = p1.width - perBarUnits;
+      heightOverhead = Math.max(0, p1.height - PROBE_HEIGHT);
+      measurable = perBarUnits > 0;
     } catch (e) {
       // Invalid data for chosen format — fall through and let real generation throw a logged error.
     }
 
-    // Pick a bar width that yields integer-pixel bars at print resolution.
     // The print canvas is at PX_PER_MM=8 (203 DPI), so `width` here is already in
-    // print pixels. We need bars that are >=1 px after the 1:renderScale blit.
-    const elementPxWidth = Math.max(1, Math.round(width));
-    let barWidthOut = moduleCount > 0 ? Math.floor(elementPxWidth / moduleCount) : 2;
-    const tooSmall = moduleCount > 0 && barWidthOut < 1;
-    if (barWidthOut < 1) barWidthOut = 1;
-    const barWidthCache = barWidthOut * renderScale;
+    // print pixels, and a module has to be at least 1 of them to survive dithering.
+    //
+    // Snapping modules to whole print pixels keeps bars crisp, but it also
+    // quantises the whole symbol to multiples of its module count: EAN-13 is 125
+    // modules, so it can only be ~15.6 mm, ~31.3 mm, ~46.9 mm and nothing
+    // between. `fitWidth` gives up that snapping so the symbol tracks the element
+    // width exactly, at the cost of bars landing on fractional pixels.
+    let barWidthCache;
+    let modulePrintWidth;
 
-    const cacheKey = `barcode_${element.id}_${barcodeData}_${barcodeFormat}_${renderWidth}_${renderHeight}_${showText}_${textFontSize}_${textBold}_${barWidthCache}_${tooSmall ? 1 : 0}`;
+    if (!measurable) {
+      barWidthCache = 2 * renderScale;
+      modulePrintWidth = 2;
+    } else if (fitWidth) {
+      barWidthCache = Math.max(0.01, (renderWidth - fixedUnits) / perBarUnits);
+      modulePrintWidth = barWidthCache / renderScale;
+    } else {
+      let barWidthOut = Math.floor(Math.floor((renderWidth - fixedUnits) / perBarUnits) / renderScale);
+      if (barWidthOut < 1) barWidthOut = 1;
+
+      // The linear fit can overshoot when JsBarcode clamps its own margins, so
+      // confirm the choice actually fits and step down if it does not.
+      while (barWidthOut > 1) {
+        let fits;
+        try {
+          fits = measure(barWidthOut * renderScale).width <= renderWidth;
+        } catch (e) {
+          break;
+        }
+        if (fits) break;
+        barWidthOut--;
+      }
+
+      barWidthCache = barWidthOut * renderScale;
+      modulePrintWidth = barWidthOut;
+    }
+
+    const tooSmall = measurable && modulePrintWidth < 1;
+
+    const cacheKey = `barcode_${element.id}_${barcodeData}_${format}_${renderWidth}_${renderHeight}_${showText}_${textFontSize}_${textBold}_${barWidthCache.toFixed(3)}_${tooSmall ? 1 : 0}`;
     let cachedCanvas = this._getFromRenderCache(cacheKey);
 
     if (!cachedCanvas) {
-      try {
-        // Reserve vertical room for the readout text
-        const textHeightScaled = showText ? renderFontSize + (8 * renderScale) : 0;
-        const barcodeHeightScaled = Math.max(1, renderHeight - textHeightScaled);
+      // Declared out here so the catch below can release the pending count even
+      // if generation throws after it was taken.
+      let settled = false;
+      let settle = () => {};
 
-        // Generate at the chosen integer module width; margin=0 since we center manually.
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      try {
+        // Reserve vertical room for the readout text. When JsBarcode draws it the
+        // space already sits inside the generated SVG, so only reserve it here for
+        // the formats we still label by hand.
+        const ownTextHeightScaled = (showText && !jsBarcodeDrawsText)
+          ? renderFontSize + (8 * renderScale)
+          : 0;
+        const availableHeight = Math.max(1, renderHeight - ownTextHeightScaled);
+        const barHeightScaled = Math.max(1, Math.round((availableHeight - heightOverhead) * 0.9));
+
+        // Generate at the chosen integer module width, quiet zones included.
+        const svg = document.createElementNS(svgNs, 'svg');
         JsBarcode(svg, barcodeData, {
-          format: barcodeFormat || 'CODE128',
+          ...baseOptions,
           width: barWidthCache,
-          height: Math.round(barcodeHeightScaled * 0.85),
-          displayValue: false,
-          margin: 0,
+          height: barHeightScaled,
+          marginLeft: quietZone * barWidthCache,
+          marginRight: quietZone * barWidthCache,
         });
 
         const svgData = new XMLSerializer().serializeToString(svg);
@@ -1227,6 +1331,13 @@ export class CanvasRenderer {
         const url = URL.createObjectURL(svgBlob);
 
         const tempImg = new Image();
+        this.pendingAsync++;
+        settle = () => {
+          if (!settled) {
+            settled = true;
+            this.pendingAsync--;
+          }
+        };
         tempImg.onload = () => {
           cachedCanvas = document.createElement('canvas');
           cachedCanvas.width = renderWidth;
@@ -1241,9 +1352,6 @@ export class CanvasRenderer {
           tempCtx.fillStyle = 'white';
           tempCtx.fillRect(0, 0, renderWidth, renderHeight);
 
-          const textSpace = showText ? renderFontSize + (6 * renderScale) : 0;
-          const availableHeight = Math.max(1, renderHeight - textSpace);
-
           // Draw at natural width to keep integer-pixel bars.
           // If the natural width exceeds the cache, the bars are clipped — we surface
           // this with a "too small" indicator so the user can resize the element.
@@ -1251,14 +1359,15 @@ export class CanvasRenderer {
           let drawH = tempImg.height;
           if (drawH > availableHeight) drawH = availableHeight;
           // Snap horizontal offset to a multiple of renderScale so the 1:3 blit
-          // samples consistent pixels across bars.
+          // samples consistent pixels across bars. Pointless once modules are
+          // fractional, and it would only nudge a fitted symbol off-centre.
           const rawDx = Math.floor((renderWidth - drawW) / 2);
-          const dx = Math.floor(rawDx / renderScale) * renderScale;
+          const dx = fitWidth ? rawDx : Math.floor(rawDx / renderScale) * renderScale;
           const dy = 2 * renderScale;
 
           tempCtx.drawImage(tempImg, dx, dy, drawW, drawH);
 
-          if (showText) {
+          if (showText && !jsBarcodeDrawsText) {
             const textY = dy + drawH + (2 * renderScale);
             if (textY < renderHeight) {
               tempCtx.fillStyle = 'black';
@@ -1279,6 +1388,7 @@ export class CanvasRenderer {
 
           this._addToRenderCache(cacheKey, cachedCanvas);
           URL.revokeObjectURL(url);
+          settle();
 
           if (this.onAsyncLoad) {
             this.onAsyncLoad();
@@ -1286,10 +1396,13 @@ export class CanvasRenderer {
         };
         tempImg.onerror = () => {
           URL.revokeObjectURL(url);
+          settle();
           logError('Barcode image load error', 'renderBarcode', ErrorLevel.WARNING);
         };
         tempImg.src = url;
       } catch (e) {
+        // Never strand the counter, or printing would wait out its whole timeout.
+        settle();
         logError(e, 'renderBarcode');
       }
     }
@@ -1322,13 +1435,24 @@ export class CanvasRenderer {
     let cachedCanvas = this._getFromRenderCache(cacheKey);
 
     if (!cachedCanvas) {
+      let settled = false;
+      let settle = () => {};
+
       try {
         cachedCanvas = document.createElement('canvas');
+        this.pendingAsync++;
+        settle = () => {
+          if (!settled) {
+            settled = true;
+            this.pendingAsync--;
+          }
+        };
         QRCode.toCanvas(cachedCanvas, qrData, {
           width: size,
           margin: 1,
           color: { dark: '#000000', light: '#ffffff' },
         }, (error) => {
+          settle();
           if (error) {
             logError(error, 'renderQR');
             this.renderCache.delete(cacheKey);
@@ -1341,6 +1465,7 @@ export class CanvasRenderer {
           }
         });
       } catch (e) {
+        settle();
         logError(e, 'renderQR');
       }
     }
@@ -1824,6 +1949,34 @@ export class CanvasRenderer {
   }
 
   /**
+   * Warm the caches every synchronous raster pass depends on.
+   *
+   * Barcodes and QR codes decode through an Image/callback, so the first render
+   * of a given payload only kicks the work off and draws a placeholder. Printing
+   * rasterises synchronously, so without this it can emit a label with the
+   * placeholder baked in instead of the code — which is guaranteed for template
+   * fields and [[date]] expressions, since those rewrite the payload (and with it
+   * the cache key) immediately before printing.
+   *
+   * @param {Array} elements - The exact elements about to be rasterised
+   * @param {number} timeoutMs - Give up waiting rather than blocking a print forever
+   */
+  async prepareForRaster(elements, timeoutMs = 5000) {
+    // A throwaway pass starts any decode that is not already cached.
+    this._renderToPixels(elements);
+
+    const start = performance.now();
+    while (this.pendingAsync > 0 || this.loadingImages.size > 0) {
+      if (performance.now() - start > timeoutMs) {
+        logError('Timed out waiting for barcode/QR/image rendering before print',
+          'prepareForRaster', ErrorLevel.WARNING);
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+  }
+
+  /**
    * Render elements to a temporary canvas and return pixel data
    * Shared helper for getRasterData and getRasterDataRaw
    */
@@ -2256,7 +2409,55 @@ export class CanvasRenderer {
    * @param {string} ditherMode - Dither mode: 'auto', 'none', 'threshold', 'floyd-steinberg', 'atkinson', 'ordered'
    * @param {'left' | 'center' | 'right'} alignment - How to align label within printer width (default: 'center')
    */
-  getRasterData(elements, printerWidthBytes = DEFAULT_PRINTER_WIDTH_BYTES, printerDpi = 203, ditherMode = 'auto', alignment = 'center') {
+  /**
+   * Lay the label bitmap onto the full printer width at pixel precision.
+   *
+   * The raster writers copy whole bytes, so on their own they can only place a
+   * label on an 8-dot grid, and `center` floors that division — biasing the label
+   * left by up to half a byte. Compositing places it exactly, and gives the user's
+   * offset somewhere to apply without bit-shifting.
+   *
+   * @param {Uint8ClampedArray} pixels - Label bitmap
+   * @param {number} width - Label width in printer dots
+   * @param {number} height
+   * @param {number} printerWidthPx - Full head width in dots
+   * @param {'left'|'center'|'right'} alignment
+   * @param {number} offsetX - Nudge in dots; positive moves right
+   */
+  _composeToPrinterWidth(pixels, width, height, printerWidthPx, alignment, offsetX = 0) {
+    let x = 0;
+    if (alignment === 'center') {
+      x = Math.round((printerWidthPx - width) / 2);
+    } else if (alignment === 'right') {
+      x = printerWidthPx - width;
+    }
+    x += offsetX;
+
+    const src = document.createElement('canvas');
+    src.width = width;
+    src.height = height;
+    const srcCtx = src.getContext('2d');
+    const srcData = srcCtx.createImageData(width, height);
+    srcData.data.set(pixels);
+    srcCtx.putImageData(srcData, 0, 0);
+
+    const out = document.createElement('canvas');
+    out.width = printerWidthPx;
+    out.height = height;
+    const outCtx = out.getContext('2d');
+    // Unprinted head area must be white, not transparent, or dithering sees black.
+    outCtx.fillStyle = 'white';
+    outCtx.fillRect(0, 0, printerWidthPx, height);
+    outCtx.drawImage(src, x, 0);
+
+    return {
+      pixels: outCtx.getImageData(0, 0, printerWidthPx, height).data,
+      width: printerWidthPx,
+      height,
+    };
+  }
+
+  getRasterData(elements, printerWidthBytes = DEFAULT_PRINTER_WIDTH_BYTES, printerDpi = 203, ditherMode = 'auto', alignment = 'center', offsetX = 0) {
     let { pixels, width, height } = this._renderToPixels(elements);
 
     // Scale up for higher DPI printers (e.g., M02 Pro at 300 DPI)
@@ -2292,22 +2493,32 @@ export class CanvasRenderer {
       height = scaledHeight;
 
       // For high-DPI printers, use the specified printer width but left-align
-      // (no centering) to avoid white gaps at the start edge
-      const data = this._pixelsToRaster(pixels, width, height, printerWidthBytes, 'left', ditherMode);
+      // (no centering) to avoid white gaps at the start edge. The user offset is
+      // in 203-DPI dots, so it scales with everything else.
+      const hiDpi = this._composeToPrinterWidth(
+        pixels, width, height, printerWidthBytes * 8, 'left', Math.round(offsetX * scale));
+      const data = this._pixelsToRaster(
+        hiDpi.pixels, hiDpi.width, hiDpi.height, printerWidthBytes, 'left', ditherMode);
 
       return {
         data,
         widthBytes: printerWidthBytes,
-        heightLines: height,
+        heightLines: hiDpi.height,
       };
     }
 
-    const data = this._pixelsToRaster(pixels, width, height, printerWidthBytes, alignment, ditherMode);
+    // Place the label across the full head width first, then rasterise it
+    // left-aligned — the byte-granular alignment inside the raster writers cannot
+    // express a sub-byte position or a user offset.
+    const placed = this._composeToPrinterWidth(
+      pixels, width, height, printerWidthBytes * 8, alignment, offsetX);
+    const data = this._pixelsToRaster(
+      placed.pixels, placed.width, placed.height, printerWidthBytes, 'left', ditherMode);
 
     return {
       data,
       widthBytes: printerWidthBytes,
-      heightLines: height,
+      heightLines: placed.height,
     };
   }
 
@@ -2320,8 +2531,16 @@ export class CanvasRenderer {
    * @param {Array} elements - Elements to render
    * @param {string} ditherMode - Dither mode: 'auto', 'none', 'threshold', 'floyd-steinberg', 'atkinson', 'ordered'
    */
-  getRasterDataRaw(elements, ditherMode = 'auto') {
-    const { pixels, width, height } = this._renderToPixels(elements);
+  getRasterDataRaw(elements, ditherMode = 'auto', offsetX = 0) {
+    let { pixels, width, height } = this._renderToPixels(elements);
+
+    // These printers raster the label at its own width, so a nudge shifts the
+    // content inside the label rather than across the head.
+    if (offsetX) {
+      ({ pixels, width, height } = this._composeToPrinterWidth(
+        pixels, width, height, width, 'left', offsetX));
+    }
+
     const widthBytes = Math.ceil(width / 8);
     const data = this._pixelsToRaster(pixels, width, height, widthBytes, false, ditherMode);
 
