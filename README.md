@@ -75,7 +75,7 @@ Phomemo printers place a label within the full width of the print head, and wher
 
 The value is in printer dots — 8 dots = 1 mm — and positive moves the print right. It is saved with your other print settings and applies to single prints, batch prints, and the print preview.
 
-It defaults to **38 dots (≈4.75 mm)**, which centres correctly on the setup this fork was tuned against. The right value depends on your printer and how the roll is loaded, so if your prints land off-centre, adjust it once and it will stick.
+Each printer definition in `printers.json` carries its own `offsetX` baseline for hardware whose roll does not sit where `alignment` assumes; the M110/M120 ships with 38 dots. Your setting in Print Settings is a fine-tune *on top* of that baseline, so it starts at 0 and you only change it if your particular unit still prints off-centre.
 
 ## Supported Printers
 

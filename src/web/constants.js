@@ -70,13 +70,12 @@ export const PRINT = {
   DEFAULT_COPIES: 1,
   DEFAULT_DENSITY: 6,
   DEFAULT_FEED: 32,
-  // Horizontal print nudge in dots (8 = 1mm), positive moves right. Compensates
-  // for the label sitting off-centre under the print head. This is a property of
-  // the printer and how its roll is loaded, not of the design, so it belongs on
-  // the printer definition rather than here once the affected models are known.
-  DEFAULT_OFFSET_X: 38,
-  MIN_OFFSET_X: -200,
-  MAX_OFFSET_X: 200,
+  // User's own horizontal print nudge in dots (8 = 1mm), positive moves right.
+  // Added on top of the model's own offsetX in printers.json, which carries the
+  // baseline for hardware whose roll does not sit where `alignment` assumes.
+  DEFAULT_OFFSET_ADJUST: 0,
+  MIN_OFFSET_ADJUST: -200,
+  MAX_OFFSET_ADJUST: 200,
 };
 
 // =============================================================================

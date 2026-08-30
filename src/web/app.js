@@ -7,7 +7,7 @@
 import { CanvasRenderer } from './canvas.js?v=120';
 import { BLETransport } from './ble.js?v=103';
 import { USBTransport } from './usb.js?v=101';
-import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=128';
+import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterOffsetX, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=130';
 import {
   createTextElement,
   createImageElement,
@@ -97,7 +97,7 @@ import {
   D_SERIES_ROUND_LABELS,
   TAPE_LABEL_SIZES,
   PM241_LABEL_SIZES,
-} from './constants.js?v=106';
+} from './constants.js?v=107';
 import {
   bindCheckbox,
   bindToggleButton,
@@ -181,7 +181,7 @@ const state = {
     copies: 1,        // Number of copies
     feed: 32,         // Feed after print in dots (8 dots = 1mm)
     printerModel: 'auto',  // 'auto', 'narrow-48', 'mini-54', 'wide-72', 'mid-76', 'wide-81', 'd-series'
-    offsetX: PRINT.DEFAULT_OFFSET_X,  // Horizontal print nudge in dots (8 = 1mm), + moves right
+    offsetAdjust: PRINT.DEFAULT_OFFSET_ADJUST,  // User nudge on top of the model's own offset
   },
   // Template state
   templateFields: [],     // Detected field names from elements
@@ -1879,7 +1879,7 @@ async function handleBatchPrint() {
 
   const btn = $('#template-print-btn');
   const originalText = btn.textContent;
-  const { density, feed, printerModel, offsetX } = state.printSettings;
+  const { density, feed, printerModel, offsetAdjust } = state.printSettings;
 
   // Calculate total prints based on multi-label mode
   const isMultiLabel = state.multiLabel.enabled;
@@ -1956,6 +1956,8 @@ async function handleBatchPrint() {
       const deviceName = state.transport.getDeviceName?.() || '';
       const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
       const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+      // Model baseline for an off-centre roll, plus the user's own nudge.
+      const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
       // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
       let ditherMode = getDitherMode(mergedElements);
       if (ditherMode === 'auto' && isTSPLPrinter(deviceName, printerModel)) {
@@ -2022,7 +2024,7 @@ async function handlePrintSinglePreview() {
 
   const btn = $('#full-preview-print');
   const originalText = btn.textContent;
-  const { density, feed, printerModel, offsetX } = state.printSettings;
+  const { density, feed, printerModel, offsetAdjust } = state.printSettings;
 
   try {
     btn.disabled = true;
@@ -2047,6 +2049,8 @@ async function handlePrintSinglePreview() {
     const deviceName = state.transport.getDeviceName?.() || '';
     const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
     const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+    // Model baseline for an off-centre roll, plus the user's own nudge.
+    const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
     // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
     let ditherMode = getDitherMode(mergedElements);
     if (ditherMode === 'auto' && isTSPLPrinter(deviceName, printerModel)) {
@@ -4762,7 +4766,7 @@ async function handleConnect(event) {
 async function handlePrint() {
   const btn = $('#print-btn');
   const originalText = btn.textContent;
-  const { density, copies, feed, printerModel, offsetX } = state.printSettings;
+  const { density, copies, feed, printerModel, offsetAdjust } = state.printSettings;
 
   try {
     btn.disabled = true;
@@ -4791,6 +4795,8 @@ async function handlePrint() {
     const printerWidth = getPrinterWidthBytes(deviceName, printerModel);
     const printerDpi = getPrinterDpi(deviceName, printerModel);
     const printerAlignment = getPrinterAlignment(deviceName, printerModel);
+    // Model baseline for an off-centre roll, plus the user's own nudge.
+    const offsetX = getPrinterOffsetX(deviceName, printerModel) + (offsetAdjust || 0);
     // Force threshold mode for TSPL printers (shipping labels need crisp barcodes)
     // Auto-detection can incorrectly choose dithering due to anti-aliased edges
     let ditherMode = getDitherMode(elementsToRender);
@@ -7521,7 +7527,7 @@ function init() {
       densityValue.textContent = state.printSettings.density;
       copiesInput.value = state.printSettings.copies;
       feedSelect.value = state.printSettings.feed;
-      offsetXInput.value = state.printSettings.offsetX ?? PRINT.DEFAULT_OFFSET_X;
+      offsetXInput.value = state.printSettings.offsetAdjust ?? PRINT.DEFAULT_OFFSET_ADJUST;
       printerModelSelect.value = state.printSettings.printerModel || 'auto';
     }
   }
@@ -7557,7 +7563,7 @@ function init() {
     densityValue.textContent = state.printSettings.density;
     copiesInput.value = state.printSettings.copies;
     feedSelect.value = state.printSettings.feed;
-    offsetXInput.value = state.printSettings.offsetX ?? PRINT.DEFAULT_OFFSET_X;
+    offsetXInput.value = state.printSettings.offsetAdjust ?? PRINT.DEFAULT_OFFSET_ADJUST;
     printerModelSelect.value = state.printSettings.printerModel || 'auto';
     printSettingsDialog.classList.remove('hidden');
   });
@@ -7576,13 +7582,13 @@ function init() {
       copies: PRINT.DEFAULT_COPIES,
       feed: PRINT.DEFAULT_FEED,
       printerModel: 'auto',
-      offsetX: PRINT.DEFAULT_OFFSET_X,
+      offsetAdjust: PRINT.DEFAULT_OFFSET_ADJUST,
     };
     densitySlider.value = PRINT.DEFAULT_DENSITY;
     densityValue.textContent = String(PRINT.DEFAULT_DENSITY);
     copiesInput.value = PRINT.DEFAULT_COPIES;
     feedSelect.value = PRINT.DEFAULT_FEED;
-    offsetXInput.value = PRINT.DEFAULT_OFFSET_X;
+    offsetXInput.value = PRINT.DEFAULT_OFFSET_ADJUST;
     printerModelSelect.value = 'auto';
   });
 
@@ -7590,7 +7596,7 @@ function init() {
     state.printSettings.density = parseInt(densitySlider.value);
     state.printSettings.copies = Math.max(PRINT.MIN_COPIES, Math.min(PRINT.MAX_COPIES, parseInt(copiesInput.value) || PRINT.DEFAULT_COPIES));
     state.printSettings.feed = parseInt(feedSelect.value);
-    state.printSettings.offsetX = Math.max(PRINT.MIN_OFFSET_X, Math.min(PRINT.MAX_OFFSET_X, parseInt(offsetXInput.value) || 0));
+    state.printSettings.offsetAdjust = Math.max(PRINT.MIN_OFFSET_ADJUST, Math.min(PRINT.MAX_OFFSET_ADJUST, parseInt(offsetXInput.value) || 0));
     state.printSettings.printerModel = printerModelSelect.value;
 
     // Save to localStorage

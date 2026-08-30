@@ -163,6 +163,7 @@
       "widthBytes": 48,
       "dpi": 203,
       "alignment": "center",
+      "offsetX": 38,
       "rotated": false,
       "tape": false,
       "tapeWidths": null,
