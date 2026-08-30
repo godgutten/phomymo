@@ -97,7 +97,7 @@ import {
   D_SERIES_ROUND_LABELS,
   TAPE_LABEL_SIZES,
   PM241_LABEL_SIZES,
-} from './constants.js?v=105';
+} from './constants.js?v=106';
 import {
   bindCheckbox,
   bindToggleButton,
@@ -181,7 +181,7 @@ const state = {
     copies: 1,        // Number of copies
     feed: 32,         // Feed after print in dots (8 dots = 1mm)
     printerModel: 'auto',  // 'auto', 'narrow-48', 'mini-54', 'wide-72', 'mid-76', 'wide-81', 'd-series'
-    offsetX: 0,       // Horizontal print nudge in dots (8 dots = 1mm), + moves right
+    offsetX: PRINT.DEFAULT_OFFSET_X,  // Horizontal print nudge in dots (8 = 1mm), + moves right
   },
   // Template state
   templateFields: [],     // Detected field names from elements
@@ -7521,7 +7521,7 @@ function init() {
       densityValue.textContent = state.printSettings.density;
       copiesInput.value = state.printSettings.copies;
       feedSelect.value = state.printSettings.feed;
-      offsetXInput.value = state.printSettings.offsetX || 0;
+      offsetXInput.value = state.printSettings.offsetX ?? PRINT.DEFAULT_OFFSET_X;
       printerModelSelect.value = state.printSettings.printerModel || 'auto';
     }
   }
@@ -7557,7 +7557,7 @@ function init() {
     densityValue.textContent = state.printSettings.density;
     copiesInput.value = state.printSettings.copies;
     feedSelect.value = state.printSettings.feed;
-    offsetXInput.value = state.printSettings.offsetX || 0;
+    offsetXInput.value = state.printSettings.offsetX ?? PRINT.DEFAULT_OFFSET_X;
     printerModelSelect.value = state.printSettings.printerModel || 'auto';
     printSettingsDialog.classList.remove('hidden');
   });
@@ -7571,12 +7571,18 @@ function init() {
   });
 
   $('#print-settings-reset').addEventListener('click', () => {
-    state.printSettings = { density: 6, copies: 1, feed: 32, printerModel: 'auto', offsetX: 0 };
-    densitySlider.value = 6;
-    densityValue.textContent = '6';
-    copiesInput.value = 1;
-    feedSelect.value = 32;
-    offsetXInput.value = 0;
+    state.printSettings = {
+      density: PRINT.DEFAULT_DENSITY,
+      copies: PRINT.DEFAULT_COPIES,
+      feed: PRINT.DEFAULT_FEED,
+      printerModel: 'auto',
+      offsetX: PRINT.DEFAULT_OFFSET_X,
+    };
+    densitySlider.value = PRINT.DEFAULT_DENSITY;
+    densityValue.textContent = String(PRINT.DEFAULT_DENSITY);
+    copiesInput.value = PRINT.DEFAULT_COPIES;
+    feedSelect.value = PRINT.DEFAULT_FEED;
+    offsetXInput.value = PRINT.DEFAULT_OFFSET_X;
     printerModelSelect.value = 'auto';
   });
 
@@ -7584,7 +7590,7 @@ function init() {
     state.printSettings.density = parseInt(densitySlider.value);
     state.printSettings.copies = Math.max(PRINT.MIN_COPIES, Math.min(PRINT.MAX_COPIES, parseInt(copiesInput.value) || PRINT.DEFAULT_COPIES));
     state.printSettings.feed = parseInt(feedSelect.value);
-    state.printSettings.offsetX = Math.max(-200, Math.min(200, parseInt(offsetXInput.value) || 0));
+    state.printSettings.offsetX = Math.max(PRINT.MIN_OFFSET_X, Math.min(PRINT.MAX_OFFSET_X, parseInt(offsetXInput.value) || 0));
     state.printSettings.printerModel = printerModelSelect.value;
 
     // Save to localStorage

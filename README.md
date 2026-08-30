@@ -75,6 +75,8 @@ Phomemo printers place a label within the full width of the print head, and wher
 
 The value is in printer dots — 8 dots = 1 mm — and positive moves the print right. It is saved with your other print settings and applies to single prints, batch prints, and the print preview.
 
+It defaults to **38 dots (≈4.75 mm)**, which centres correctly on the setup this fork was tuned against. The right value depends on your printer and how the roll is loaded, so if your prints land off-centre, adjust it once and it will stick.
+
 ## Supported Printers
 
 | Model | Width | Notes |
